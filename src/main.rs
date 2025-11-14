@@ -8,7 +8,6 @@ const DT_FMT: &'static str = "%H:%M %d.%m.%y";
 
 type LocalDT = chrono::DateTime<chrono::Local>;
 
-
 fn get_database_connection() -> Result<rusqlite::Connection, String> {
     let mut path = match std::env::var("XDG_DATA_HOME") {
         Ok(v) => std::path::PathBuf::from(v),
@@ -75,7 +74,50 @@ PRIMARY KEY(id)
         Ok(App { conn, now })
     }
 
+    pub fn get_last_entry(&self) -> Result<Entry, String> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT * FROM entries where datetime = (SELECT MAX(datetime) from entries);")
+            .map_err(|err| format!("Could not prepare statement: {err}"))?;
+        let mut rows = statement
+            .query(())
+            .map_err(|err| format!("Could not get last entry: {err}"))?;
+
+        let last_entry = match rows.next() {
+            Ok(Some(row)) => Entry::from_db_row(row)?,
+            Ok(None) => {
+                return Err(format!("Cannot insert an end entry as the first entry."));
+            }
+            Err(_) => todo!(),
+        };
+
+        if matches!(rows.next(), Ok(Some(_))) {
+            return Err(format!(
+                "More than one entry with the maximum timestamp. wow! This is an error, but very unlikely and we don't want to deal with that yet."
+            ));
+        }
+
+        Ok(last_entry)
+    }
+
     pub fn add_begin(&mut self) -> Result<(), String> {
+        let last_entry = self.get_last_entry()?;
+
+        match last_entry {
+            Entry::Begin(date_time) => {
+                return Err(format!(
+                    "Cannot start period. Current period started at {} is still running.",
+                    date_time.format(DT_FMT)
+                ));
+            }
+            Entry::End(date_time) => {
+                println!(
+                    "Starting new period. Last one ended at {}",
+                    date_time.format(DT_FMT)
+                )
+            }
+        }
+
         self.conn
             .execute(
                 "INSERT INTO entries (datetime, kind) VALUES (?1, 0)",
@@ -87,6 +129,20 @@ PRIMARY KEY(id)
     }
 
     pub fn add_end(&mut self) -> Result<(), String> {
+        let last_entry = self.get_last_entry()?;
+
+        match last_entry {
+            Entry::Begin(date_time) => {
+                println!("Ending period started at {}", date_time.format(DT_FMT))
+            }
+            Entry::End(date_time) => {
+                return Err(format!(
+                    "Cannot end period. Last period has already been ended at {}.",
+                    date_time.format(DT_FMT)
+                ));
+            }
+        }
+
         self.conn
             .execute(
                 "INSERT INTO entries (datetime, kind) VALUES (?1, 1)",
@@ -100,7 +156,7 @@ PRIMARY KEY(id)
     fn show(&self) -> Result<(), String> {
         let mut query = self
             .conn
-            .prepare("SELECT * FROM entries;")
+            .prepare("SELECT * FROM entries order by datetime;")
             .map_err(|err| format!("Could prepare entries query: {err}"))?;
         let mut entries = query
             .query(())
@@ -112,10 +168,10 @@ PRIMARY KEY(id)
             match entry {
                 Entry::Begin(dt) => {
                     println!("BEGIN: {}", dt.format(DT_FMT));
-                },
+                }
                 Entry::End(dt) => {
                     println!("END:   {}", dt.format(DT_FMT));
-                },
+                }
             }
         }
 
