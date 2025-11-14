@@ -12,9 +12,9 @@ $ cargo install --path .
 
 ## Commands 
 ```bash
-tracc show  # show entries
-tracc begin # begin work period
-tracc end   # end work period
+$ tracc show  # show entries
+$ tracc begin # begin work period
+$ tracc end   # end work period
 ```
 
 ## ROADMAP
