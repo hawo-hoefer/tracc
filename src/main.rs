@@ -1,0 +1,187 @@
+use clap::Parser;
+use rusqlite::Row;
+use rusqlite::config::DbConfig;
+
+const HOME_DIR: &'static str = "tracc";
+const DATABASE_FILE: &'static str = "db.sqlite";
+const DT_FMT: &'static str = "%H:%M %d.%m.%y";
+
+type LocalDT = chrono::DateTime<chrono::Local>;
+
+
+fn get_database_connection() -> Result<rusqlite::Connection, String> {
+    let mut path = match std::env::var("XDG_DATA_HOME") {
+        Ok(v) => std::path::PathBuf::from(v),
+        Err(v) => match v {
+            std::env::VarError::NotPresent => std::env::home_dir()
+                .map(|mut x| {
+                    x.push(".local");
+                    x.push("share");
+                    x
+                })
+                .ok_or(format!("Could not determine home directory"))?,
+            std::env::VarError::NotUnicode(_) => {
+                return Err(format!(
+                    "Could not get config home directory. Returned string was not unicode."
+                ));
+            }
+        },
+    };
+    path.push(HOME_DIR);
+
+    if !path.exists() {
+        std::fs::create_dir_all(&path)
+            .map_err(|err| format!("Could not create data directory: {err}"))?;
+    } else {
+        if path.is_file() {
+            return Err(format!("Could not get data directory. Is a file."));
+        }
+    };
+    path.push(DATABASE_FILE);
+
+    // TODO: handle the error properly
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|err| format!("Could not open database connection: {err}"))?;
+
+    let ret = conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true)
+        .map_err(|err| format!("Could not enable foreign key constraints: {err}"))?;
+
+    Ok(conn)
+}
+
+struct App {
+    conn: rusqlite::Connection,
+    now: LocalDT,
+}
+
+impl App {
+    pub fn try_init() -> Result<Self, String> {
+        let conn = get_database_connection()?;
+        let now = chrono::Local::now();
+
+        let _ = conn
+            .execute(
+                "create table if not exists entries (
+id INTEGER, 
+datetime INTEGER,
+kind INTEGER,
+PRIMARY KEY(id)
+);",
+                (),
+            )
+            .map_err(|err| format!("Could not create entries table: {err}"))?;
+
+        Ok(App { conn, now })
+    }
+
+    pub fn add_begin(&mut self) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO entries (datetime, kind) VALUES (?1, 0)",
+                (self.now.timestamp(),),
+            )
+            .map_err(|err| format!("Could not insert new begin entry: {err}"))?;
+
+        Ok(())
+    }
+
+    pub fn add_end(&mut self) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO entries (datetime, kind) VALUES (?1, 1)",
+                (self.now.timestamp(),),
+            )
+            .map_err(|err| format!("Could not insert new end entry: {err}"))?;
+
+        Ok(())
+    }
+
+    fn show(&self) -> Result<(), String> {
+        let mut query = self
+            .conn
+            .prepare("SELECT * FROM entries;")
+            .map_err(|err| format!("Could prepare entries query: {err}"))?;
+        let mut entries = query
+            .query(())
+            .map_err(|err| format!("Could not query entries: {err}"))?;
+
+        while let Ok(Some(row)) = entries.next() {
+            let entry = Entry::from_db_row(row)?;
+
+            match entry {
+                Entry::Begin(dt) => {
+                    println!("BEGIN: {}", dt.format(DT_FMT));
+                },
+                Entry::End(dt) => {
+                    println!("END:   {}", dt.format(DT_FMT));
+                },
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(clap::Parser, Debug)]
+enum Command {
+    Begin,
+    End,
+    Show,
+}
+
+enum Entry {
+    Begin(LocalDT),
+    End(LocalDT),
+}
+
+fn import_datetime(x: i64) -> LocalDT {
+    chrono::DateTime::from_timestamp(x, 0)
+        .unwrap()
+        .with_timezone(&chrono::Local)
+}
+
+impl Entry {
+    pub fn from_db_row(row: &Row) -> Result<Entry, String> {
+        let timestamp: LocalDT = row
+            .get("datetime")
+            .map(import_datetime)
+            .map_err(|err| format!("Could not get datetime from row: {err}"))?;
+
+        let kind: i64 = row
+            .get("kind")
+            .map_err(|err| format!("Could not get datetime from row: {err}"))?;
+        Ok(match kind {
+            0 => Entry::Begin(timestamp),
+            1 => Entry::End(timestamp),
+            _ => {
+                return match row.get::<_, i64>("id") {
+                    Ok(id) => Err(format!(
+                        "Corrupted database contents: Found entry kind {kind} at id {id}. Expected 0 (Begin) or 1 (End)."
+                    )),
+                    Err(other_err) => Err(format!(
+                        "Corrupted database contents: Found entry kind {kind}. Expected 0 (Begin) or 1 (End). Another error occurred when trying to get the corresponding entry id: {other_err}."
+                    )),
+                };
+            }
+        })
+    }
+}
+
+fn main() {
+    let mut app = App::try_init().unwrap_or_else(|err| {
+        eprintln!("Could not initialize application: {err}");
+        std::process::exit(1);
+    });
+
+    let args = Command::parse();
+    match args {
+        Command::Begin => app.add_begin(),
+        Command::End => app.add_end(),
+        Command::Show => app.show(),
+    }
+    .unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(1);
+    });
+}
