@@ -1,3 +1,4 @@
+use chrono::{Days, NaiveTime, TimeDelta, Timelike};
 use clap::Parser;
 use rusqlite::Row;
 use rusqlite::config::DbConfig;
@@ -74,7 +75,7 @@ PRIMARY KEY(id)
         Ok(App { conn, now })
     }
 
-    pub fn get_last_entry(&self) -> Result<Entry, String> {
+    pub fn get_last_entry(&self) -> Result<Option<Entry>, String> {
         let mut statement = self
             .conn
             .prepare("SELECT * FROM entries where datetime = (SELECT MAX(datetime) from entries);")
@@ -86,7 +87,7 @@ PRIMARY KEY(id)
         let last_entry = match rows.next() {
             Ok(Some(row)) => Entry::from_db_row(row)?,
             Ok(None) => {
-                return Err(format!("Cannot insert an end entry as the first entry."));
+                return Ok(None);
             }
             Err(_) => todo!(),
         };
@@ -97,24 +98,27 @@ PRIMARY KEY(id)
             ));
         }
 
-        Ok(last_entry)
+        Ok(Some(last_entry))
     }
 
     pub fn add_begin(&mut self) -> Result<(), String> {
         let last_entry = self.get_last_entry()?;
 
         match last_entry {
-            Entry::Begin(date_time) => {
+            Some(Entry::Begin(date_time)) => {
                 return Err(format!(
                     "Cannot start period. Current period started at {} is still running.",
                     date_time.format(DT_FMT)
                 ));
             }
-            Entry::End(date_time) => {
+            Some(Entry::End(date_time)) => {
                 println!(
                     "Starting new period. Last one ended at {}",
                     date_time.format(DT_FMT)
                 )
+            }
+            None => {
+                println!("Starting new period.",)
             }
         }
 
@@ -132,15 +136,16 @@ PRIMARY KEY(id)
         let last_entry = self.get_last_entry()?;
 
         match last_entry {
-            Entry::Begin(date_time) => {
+            Some(Entry::Begin(date_time)) => {
                 println!("Ending period started at {}", date_time.format(DT_FMT))
             }
-            Entry::End(date_time) => {
+            Some(Entry::End(date_time)) => {
                 return Err(format!(
                     "Cannot end period. Last period has already been ended at {}.",
                     date_time.format(DT_FMT)
                 ));
             }
+            None => return Err(format!("Cannot insert end entry as first entry")),
         }
 
         self.conn
@@ -177,6 +182,61 @@ PRIMARY KEY(id)
 
         Ok(())
     }
+
+    fn today(&self) -> Result<(), String> {
+        let today_start = self
+            .now
+            .with_time(NaiveTime::from_hms_opt(0, 0, 0).expect("is valid"))
+            .unwrap();
+
+        let today_end = today_start
+            .checked_add_days(Days::new(1))
+            .expect("is inside of range");
+
+        let mut query = self
+            .conn
+            .prepare(
+                "SELECT * FROM entries where datetime >= ?1 and datetime < ?2 order by datetime;",
+            )
+            .map_err(|err| format!("Could prepare entries query: {err}"))?;
+
+        let mut entries = query
+            .query((today_start.timestamp(), today_end.timestamp()))
+            .map_err(|err| format!("Could not query entries: {err}"))?;
+
+        let mut time = TimeDelta::zero();
+
+        let mut current_slot_begin = None;
+        while let Ok(Some(row)) = entries.next() {
+            let entry = Entry::from_db_row(row)?;
+
+            match entry {
+                Entry::Begin(dt) => {
+                    current_slot_begin = Some(dt)
+                }
+                Entry::End(dt) => {
+                    if let Some(begin) = current_slot_begin {
+                        time += dt - begin;
+                        current_slot_begin = None;
+                    } else {
+                        return Err(format!(
+                            "Corrupted database. End at {} without previous period begin.",
+                            dt.format(DT_FMT)
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(begin) = current_slot_begin {
+            time += self.now - begin;
+        }
+        if time.num_days() != 0 {
+            return Err(format!("Error with timedelta calculation. Number of days cannot be greater than 0. this must be a database corruption issue."));
+        }
+        println!("Total time spent today: {:2}:{:02}", time.num_hours(), time.num_minutes() - time.num_hours() * 60);
+
+        Ok(())
+    }
 }
 
 #[derive(clap::Parser, Debug)]
@@ -184,6 +244,7 @@ enum Command {
     Begin,
     End,
     Show,
+    Today,
 }
 
 enum Entry {
@@ -235,6 +296,7 @@ fn main() {
         Command::Begin => app.add_begin(),
         Command::End => app.add_end(),
         Command::Show => app.show(),
+        Command::Today => app.today(),
     }
     .unwrap_or_else(|err| {
         eprintln!("{err}");
