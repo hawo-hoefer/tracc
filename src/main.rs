@@ -167,17 +167,52 @@ PRIMARY KEY(id)
             .query(())
             .map_err(|err| format!("Could not query entries: {err}"))?;
 
+        let mut day: Option<(LocalDT, LocalDT, TimeDelta)> = None;
+
+        let print_day_summary = |day: LocalDT, spent: TimeDelta| {
+            println!(
+                "===== {} - {:2}:{:02} =====",
+                day.format("%d.%m.%y"),
+                spent.num_hours(),
+                spent.num_minutes() - spent.num_hours() * 60
+            );
+        };
+
+        // let times = Vec::new();
         while let Ok(Some(row)) = entries.next() {
             let entry = Entry::from_db_row(row)?;
 
             match entry {
                 Entry::Begin(dt) => {
+                    let today_start = dt
+                        .with_time(NaiveTime::from_hms_opt(0, 0, 0).expect("is valid"))
+                        .unwrap();
+
+                    if let Some((d, _, spent)) = day {
+                        if today_start != d {
+                            print_day_summary(d, spent);
+                            day = Some((today_start, dt, TimeDelta::zero()));
+                        } else {
+                            day = Some((d, dt, spent));
+                        }
+                    } else {
+                        day = Some((today_start, dt, TimeDelta::zero()));
+                    }
                     println!("BEGIN: {}", dt.format(DT_FMT));
                 }
                 Entry::End(dt) => {
                     println!("END:   {}", dt.format(DT_FMT));
+                    if let Some((_, begin, spent)) = day.as_mut() {
+                        *spent += dt - *begin;
+                    } else {
+                        unreachable!("Database error")
+                    }
                 }
             }
+        }
+
+        if let Some(day) = day {
+            print_day_summary(day.0, day.2);
         }
 
         Ok(())
@@ -211,9 +246,7 @@ PRIMARY KEY(id)
             let entry = Entry::from_db_row(row)?;
 
             match entry {
-                Entry::Begin(dt) => {
-                    current_slot_begin = Some(dt)
-                }
+                Entry::Begin(dt) => current_slot_begin = Some(dt),
                 Entry::End(dt) => {
                     if let Some(begin) = current_slot_begin {
                         time += dt - begin;
@@ -231,9 +264,15 @@ PRIMARY KEY(id)
             time += self.now - begin;
         }
         if time.num_days() != 0 {
-            return Err(format!("Error with timedelta calculation. Number of days cannot be greater than 0. this must be a database corruption issue."));
+            return Err(format!(
+                "Error with timedelta calculation. Number of days cannot be greater than 0. this must be a database corruption issue."
+            ));
         }
-        println!("Total time spent today: {:2}:{:02}", time.num_hours(), time.num_minutes() - time.num_hours() * 60);
+        println!(
+            "Total time spent today: {:2}:{:02}",
+            time.num_hours(),
+            time.num_minutes() - time.num_hours() * 60
+        );
 
         Ok(())
     }
