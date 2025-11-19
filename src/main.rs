@@ -280,9 +280,13 @@ PRIMARY KEY(id)
 
 #[derive(clap::Parser, Debug)]
 enum Command {
+    #[command(about = "start a time period")]
     Begin,
+    #[command(about = "end a time period")]
     End,
+    #[command(about = "show past activity")]
     Show,
+    #[command(about = "Show the current day")]
     Today,
 }
 
