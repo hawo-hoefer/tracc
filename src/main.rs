@@ -1,4 +1,4 @@
-use chrono::{Days, NaiveTime, TimeDelta, Timelike};
+use chrono::{Days, Local, NaiveDate, NaiveTime, TimeDelta, Timelike};
 use clap::Parser;
 use rusqlite::Row;
 use rusqlite::config::DbConfig;
@@ -158,13 +158,26 @@ PRIMARY KEY(id)
         Ok(())
     }
 
-    fn show(&self) -> Result<(), String> {
+    fn show(&self, since: Option<String>, until: Option<String>) -> Result<(), String> {
+        let since = since
+            .map(parse_date_time)
+            .unwrap_or(Ok(import_datetime(0)))
+            .map_err(|err| format!("ERROR: Invalid 'since': {err}"))?;
+
+        let until = until
+            .map(parse_date_time)
+            .unwrap_or(Ok(self.now))
+            .map_err(|err| format!("ERROR: Invalid 'until': {err}"))?;
+
         let mut query = self
             .conn
-            .prepare("SELECT * FROM entries order by datetime;")
+            .prepare(
+                "SELECT * FROM entries WHERE datetime >= ?1 AND datetime <= ?2 ORDER BY datetime;",
+            )
             .map_err(|err| format!("Could prepare entries query: {err}"))?;
+
         let mut entries = query
-            .query(())
+            .query((since.timestamp(), until.timestamp()))
             .map_err(|err| format!("Could not query entries: {err}"))?;
 
         let mut day: Option<(LocalDT, LocalDT, TimeDelta)> = None;
@@ -201,11 +214,14 @@ PRIMARY KEY(id)
                     println!("BEGIN: {}", dt.format(DT_FMT));
                 }
                 Entry::End(dt) => {
-                    println!("END:   {}", dt.format(DT_FMT));
                     if let Some((_, begin, spent)) = day.as_mut() {
                         *spent += dt - *begin;
+                        println!("END:   {}", dt.format(DT_FMT));
                     } else {
-                        unreachable!("Database error")
+                        // This can actually happen, because we can restrict the
+                        // selection time frame.
+                        // Output highlighted, but ignore entries until we find an end timeslot
+                        println!("\x1b[31;1mEND:   {}\x1b[0m <== missing start", dt.format(DT_FMT));
                     }
                 }
             }
@@ -285,7 +301,12 @@ enum Command {
     #[command(about = "end a time period")]
     End,
     #[command(about = "show past activity")]
-    Show,
+    Show {
+        #[arg(long, short, help = "show activity since date/time (dd.mm.yy [HH:MM])")]
+        since: Option<String>,
+        #[arg(long, short, help = "show activity until date/time (dd.mm.yy [HH:MM])")]
+        until: Option<String>,
+    },
     #[command(about = "Show the current day")]
     Today,
 }
@@ -293,6 +314,26 @@ enum Command {
 enum Entry {
     Begin(LocalDT),
     End(LocalDT),
+}
+
+fn parse_date_time(repr: impl AsRef<str>) -> Result<LocalDT, String> {
+    if let Some((date, time)) = repr.as_ref().split_once(" ") {
+        let date = NaiveDate::parse_from_str(date, "%d.%m.%Y")
+            .map_err(|err| format!("Could not parse date: {err}"))?;
+        let time = NaiveTime::parse_from_str(time, "%H:%M")
+            .map_err(|err| format!("Could not parse time: {err}"))?;
+        let dt = date.and_time(time).and_local_timezone(Local).unwrap();
+        Ok(dt)
+    } else {
+        let date = NaiveDate::parse_from_str(repr.as_ref(), "%d.%m.%Y")
+            .map_err(|err| format!("Could not parse date: {err}"))?;
+        let dt = date
+            .and_hms_opt(8, 0, 0)
+            .expect("valid time")
+            .and_local_timezone(Local)
+            .unwrap();
+        Ok(dt)
+    }
 }
 
 fn import_datetime(x: i64) -> LocalDT {
@@ -338,7 +379,7 @@ fn main() {
     match args {
         Command::Begin => app.add_begin(),
         Command::End => app.add_end(),
-        Command::Show => app.show(),
+        Command::Show { since, until } => app.show(since, until),
         Command::Today => app.today(),
     }
     .unwrap_or_else(|err| {
